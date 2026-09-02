@@ -45,17 +45,48 @@
 - **理由**：重用既有三態屬性欄位語意一致，且不需要新的比對邏輯層；讓 LLM 的自由文字輸出收斂成可驗證的白名單值，降低不可預期行為風險。
 - **替代方案**：讓 Groq 直接生成 SQL 或 ORM 查詢條件字串——被否決，安全風險高且難驗證。
 
-### 4. 查詢邏輯
-`CafeSearchService.search_by_description(description: str) -> QuerySet[Cafe]`（新 service，比照 `cafe/services/` 既有結構）：
-1. 呼叫 `GroqAPI.parse_search_description`，解析失敗則整體 fallback 為「用原始描述字串比對 `ai_summary` icontains」（降級路徑，見 Risks）。
-2. 解析成功則對每個非 `null` 欄位疊加 `Cafe.objects.filter(<field>=value)`，僅查詢已有 `ai_summary`（`ai_summary__isnull=False`）且屬性已計算過（`attributes_last_calculated_at__isnull=False`）的店家，避免把「未知」誤判為「不符合」。
-3. 若解析結果全為 `null`（描述沒有可辨識屬性），改用 `ai_summary__icontains` 對描述中的關鍵詞做輔助比對（簡單詞袋，非语意）。
-4. 查無結果時回傳空結果，由 LINE handler 呈現「找不到符合描述的店家」，不是例外。
+**解析失敗的認定範圍**：呼叫 `parse_search_description` 時，只要滿足以下任一情況，一律視為「解析失敗」，統一走 4.1 的關鍵字降級路徑，不對使用者顯示錯誤訊息：
+- Groq API 呼叫發生例外或逾時
+- 回傳內容不是合法 JSON
+- JSON 內含未定義的屬性名稱
+- 任一屬性數值不在 `{yes, maybe, no, null}` 範圍內
+
+只有「額度已用盡」是唯一需要直接回覆使用者明確提示、且不呼叫 Groq 的情況（見決策 4 的 `CafeSearchResult(status='quota_exceeded')`）。
+
+### 3b. 關鍵字降級搜尋演算法
+當描述解析失敗，或解析成功但所有屬性皆為 `null`（無可辨識屬性）時，皆改用同一套關鍵字降級搜尋，比對對象為原始使用者描述字串。
+
+繁體中文描述通常不含空白（例如「我想找安靜適合工作的咖啡廳」），單純以空白/標點切分會把整句當成一個詞，導致 `icontains` 幾乎不可能命中。因此斷詞 **必須使用中文斷詞工具**，不可只靠標點/空白正規表示式：
+1. **斷詞**：新增 `jieba` 套件依賴，以 `jieba.cut_for_search(description)` 對原始描述斷詞（搜尋模式會額外切出較短的子詞，提高關鍵詞比對的召回率），取得候選詞清單；再對候選詞逐一 `strip()` 並過濾掉空字串與純標點（例如以 `re.fullmatch(r'[\W_]+', token)` 判斷）。
+2. **停用詞過濾**：套用固定停用詞清單（例如：`的`、`了`、`是`、`我`、`想`、`要`、`找`、`一個`、`一間`、`有`、`家`、`附近`、`咖啡店`、`咖啡廳`、`店`），移除清單內的詞；清單放在程式碼常數中，供測試直接引用。
+3. **長度過濾**：移除長度為 1 的候選詞（單一中文字或單一字元雜訊通常語意過弱，容易造成大量誤命中）。
+4. **去重**：對剩餘關鍵詞去除重複。
+5. 若過濾後關鍵詞為空（例如輸入全是停用詞、標點或單字），視為「無有效關鍵詞」，直接回傳空結果（走 4.4 的查無結果訊息，不對 `ai_summary` 做任何比對）。
+6. 若有至少一個關鍵詞，對每個關鍵詞建立 `ai_summary__icontains=<關鍵詞>`，以 **OR**（`Q` 物件疊加）方式合併——只要摘要命中任一關鍵詞即回傳，理由是這是降級路徑，優先保「有結果」的召回率而非精準度。
+
+**依賴新增**：`pyproject.toml` 新增 `jieba` 為執行期依賴（純 Python、無外部服務呼叫，斷詞結果確定性可測試）。測試需涵蓋不含空白的中文長句（例如上例）驗證能切出「安靜」「工作」「咖啡廳」等有效關鍵詞，且停用詞與單字被正確濾除。
+
+### 4. 查詢邏輯與回傳型別
+`search_by_description` 若直接回傳 `QuerySet[Cafe]`，handler 無法區分「額度不足」與「查無結果」（兩者都可能是空的 QuerySet 或需要另一個 out-of-band 訊號），容易讓實作用不明確的 sentinel 值頂替。因此改為回傳一個明確的 discriminated result：
+
+```python
+@dataclass
+class CafeSearchResult:
+    status: Literal['ok', 'quota_exceeded']
+    cafes: QuerySet[Cafe]  # status == 'quota_exceeded' 時固定為 Cafe.objects.none()
+```
+
+`CafeSearchService.search_by_description(description: str, user_id: int) -> CafeSearchResult`（新 service，比照 `cafe/services/` 既有結構）：
+1. 先檢查 AI 呼叫額度（`ApiUsageService.try_increment_ai_calls` 等價介面）。額度不足時，**不呼叫 Groq**，直接回傳 `CafeSearchResult(status='quota_exceeded', cafes=Cafe.objects.none())`，流程結束。
+2. 額度充足時佔用額度並呼叫 `GroqAPI.parse_search_description`；依上述「解析失敗的認定範圍」判定為失敗時，`revert_ai_call` 歸還額度（本次未產出可用結果，不應計為成功消耗），並一律走 3b 的關鍵字降級搜尋，最終回傳 `CafeSearchResult(status='ok', cafes=<降級搜尋結果，含空結果>)`，不額外拋出錯誤給呼叫端。
+3. 解析成功且至少一個欄位非 `null` 時，對每個非 `null` 欄位疊加 `Cafe.objects.filter(<field>=value)`，僅查詢已有 `ai_summary`（`ai_summary__isnull=False`）且屬性已計算過（`attributes_last_calculated_at__isnull=False`）的店家，避免把「未知」誤判為「不符合」；回傳 `CafeSearchResult(status='ok', cafes=<查詢結果>)`。
+4. 解析成功但所有欄位皆為 `null`（描述沒有可辨識屬性）時，同樣走 3b 的關鍵字降級搜尋，回傳 `status='ok'`。
+5. `status='ok'` 且查無結果時，`cafes` 為空 QuerySet，由 LINE handler 呈現「找不到符合描述的店家」；`status='quota_exceeded'` 時 handler 改顯示額度不足訊息。兩者在型別上明確可辨，handler 不需要靠「QuerySet 是否為空」猜測發生了什麼事。
 
 ### 5. LINE Bot 對話流程
 新增 `UserState` 狀態 `AWAITING_DESCRIPTION_SEARCH`（比照既有搜尋狀態模式）：
 1. 使用者由 Rich Menu 或既有選單觸發「描述搜尋」→ 進入該狀態並提示輸入描述。
-2. 下一則文字訊息視為描述輸入，呼叫 `CafeSearchService.search_by_description`，額度用盡或 Groq 例外時比照 `handle_ask_ai` 的錯誤訊息模式提示使用者。
+2. 下一則文字訊息視為描述輸入，呼叫 `CafeSearchService.search_by_description`，依回傳的 `CafeSearchResult.status` 分流：`quota_exceeded` 顯示明確的額度不足提示；`ok` 一律以「找不到符合描述的店家」或結果清單呈現 `cafes`，不顯示「AI 暫時無法使用」之類的錯誤訊息（Groq 例外、逾時、格式不合法都已在 service 內部被吸收為關鍵字降級搜尋，對 handler 而言都是 `status='ok'`）。
 3. 結果比照既有搜尋結果 Flex Message carousel 呈現（複用既有 builder，不新增樣式）。
 
 ## Risks / Trade-offs
@@ -69,7 +100,7 @@
 
 1. 新增 migration：`Cafe.ai_summary`（`TextField(null=True, blank=True)`），不需 backfill（欄位預設為空，既有店家由後續 refresh 週期自然補齊）。
 2. 部署後，既有店家的 `ai_summary` 皆為 `None`，描述搜尋在補齊完成前召回率偏低；此為預期過渡狀態，不需要额外的一次性 backfill script（可選：若需加速覆蓋率，另開一次性 management command 補跑舊店家，非本次必要範圍，列入 tasks.md 視情況決定）。
-3. Rollback：`ai_summary` 欄位與新 task/service/state 皆為新增，不影響既有欄位與流程；migration 可安全 reverse（欄位為 nullable，無資料遺失風險）。
+3. Rollback：程式碼（新 task/service/state）可安全回退，不影響既有欄位與流程。但 `ai_summary` **欄位本身的反向 migration 會直接刪除該欄位，連同當時已產生的所有摘要資料一併遺失**——nullable 只代表欄位允許空值，不代表 reverse migration 不會清空資料。若日後需要回滾且必須保留已產生的摘要，需先執行一次性匯出（例如 `manage.py dumpdata` 或另存快照）再 reverse migration；若擔心資料遺失風險，也可選擇「保留欄位、只回退程式碼」的部分回滾策略，不對 `ai_summary` 欄位做 reverse migration。
 
 ## Open Questions
 

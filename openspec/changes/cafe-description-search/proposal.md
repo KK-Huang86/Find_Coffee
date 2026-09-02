@@ -24,4 +24,5 @@
 - **Celery tasks**: `cafe/tasks.py`（新增或擴充 task 產生/更新 `ai_summary`，串接 `GroqAPI`）。
 - **LINE Bot**: `line_bot/state.py`（新增描述搜尋對話狀態）、`line_bot/handlers/`（新增描述搜尋 handler）、`line_bot/builders/`（結果呈現、可能新增入口按鈕/Rich Menu 項目）。
 - **Integrations**: `integrations/groq/api.py`（新增描述解析用的 prompt/方法，例如 `GroqAPI.parse_search_description`）、`integrations/services.py`（`ApiUsageService` 額度呼叫路徑增加）。
+- **Dependencies**: 新增 `jieba`（中文斷詞，供關鍵字降級搜尋使用，見 design.md）。
 - **Tests**: 對應新增/擴充 `cafe/tests/`、`line_bot/tests/`、`integrations/tests/`，含邊界案例（空描述、Groq 失敗、無符合結果、額度用盡）。
