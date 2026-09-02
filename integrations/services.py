@@ -10,6 +10,16 @@ logger = logging.getLogger(__name__)
 
 class ApiUsageService:
 
+    SYSTEM_AI_USER_LINE_ID = 'system:ai-summary-batch'
+
+    @staticmethod
+    def get_system_ai_user_id():
+        """取得（或建立）供批次 AI 摘要生成使用的系統帳號 id，與真人使用者額度分開計數"""
+        from users.models import User
+
+        user, _ = User.objects.get_or_create(line_user_id=ApiUsageService.SYSTEM_AI_USER_LINE_ID)
+        return user.id
+
     @staticmethod
     def _get_year_month():
         return timezone.now().strftime('%Y-%m')

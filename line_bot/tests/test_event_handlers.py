@@ -606,3 +606,120 @@ class TestHandleMessageDistrictSearch:
 
         call_args = mock_api.reply_message.call_args[0][0]
         assert '找不到' in call_args.messages[0].text
+
+
+@pytest.mark.django_db
+class TestHandleMessageDescriptionSearch:
+    """測試 WAITING_DESCRIPTION_SEARCH 狀態"""
+
+    def _make_event(self, user_id, text, reply_token='test_token'):
+        event = MagicMock()
+        event.source.user_id = user_id
+        event.message.text = text
+        event.reply_token = reply_token
+        return event
+
+    def _run(self, user, text):
+        event = self._make_event(user.line_user_id, text)
+        with (
+            patch('line_bot.event_handlers.ApiClient'),
+            patch('line_bot.event_handlers.MessagingApi') as mock_cls,
+            patch('line_bot.event_handlers.StateManager.get_state', return_value=UserState.WAITING_DESCRIPTION_SEARCH),
+            patch('line_bot.event_handlers.StateManager.reset_state') as mock_reset,
+            patch('line_bot.event_handlers.LockService.acquire', return_value=True),
+            patch('line_bot.event_handlers.show_loading'),
+        ):
+            mock_api = MagicMock()
+            mock_cls.return_value = mock_api
+            handle_message(event)
+        return mock_api, mock_reset
+
+    def test_calls_description_search_handler_and_resets_state(self):
+        """觸發描述搜尋 handler，並在完成後重置狀態"""
+        user = UserFactory()
+        with patch(
+            'line_bot.event_handlers.handle_description_search_text'
+        ) as mock_handler:
+            mock_api, mock_reset = self._run(user, '安靜適合工作、有插座的店')
+
+        mock_handler.assert_called_once()
+        args, _ = mock_handler.call_args
+        assert args[3] == '安靜適合工作、有插座的店'
+        mock_reset.assert_called_once_with(user.line_user_id)
+
+    def test_no_results_replies_not_found(self):
+        """查無符合描述的店家時，回覆找不到訊息"""
+        user = UserFactory()
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description'
+        ) as mock_search:
+            from cafe.services.search_service import CafeSearchResult
+            from cafe.models import Cafe
+            mock_search.return_value = CafeSearchResult(status='ok', cafes=Cafe.objects.none())
+            mock_api, _ = self._run(user, '安靜的店')
+
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert '找不到' in call_args.messages[0].text
+
+    def test_blank_input_does_not_crash(self):
+        """空白輸入不拋例外，仍完成一次回覆"""
+        user = UserFactory()
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description'
+        ) as mock_search:
+            from cafe.services.search_service import CafeSearchResult
+            from cafe.models import Cafe
+            mock_search.return_value = CafeSearchResult(status='ok', cafes=Cafe.objects.none())
+            mock_api, _ = self._run(user, '   ')
+
+        mock_api.reply_message.assert_called_once()
+
+    def test_end_to_end_flow_finds_matching_cafe_via_structured_attribute(self):
+        """端到端整合驗證：只 mock Groq 邊界，LINE 對話輸入描述 → 解析成屬性 → 查到符合的咖啡店並回覆"""
+        from cafe.tests.factories import CafeFactory as CafeFactoryForCafeApp
+        from django.utils import timezone
+
+        user = UserFactory()
+        matching_cafe = CafeFactoryForCafeApp(
+            name='安靜工作咖啡',
+            has_socket='yes',
+            ai_summary='適合安靜工作的咖啡店，插座充足。',
+            attributes_last_calculated_at=timezone.now(),
+        )
+        CafeFactoryForCafeApp(
+            name='熱鬧聚會咖啡',
+            has_socket='no',
+            ai_summary='適合朋友聚會聊天。',
+            attributes_last_calculated_at=timezone.now(),
+        )
+
+        with patch(
+            'cafe.services.search_service.GroqAPI.parse_search_description',
+            return_value={'limited_time': None, 'has_socket': 'yes', 'pet_friendly': None, 'has_pet': None},
+        ):
+            mock_api, mock_reset = self._run(user, '安靜適合工作、有插座的店')
+
+        mock_api.reply_message.assert_called_once()
+        call_args = mock_api.reply_message.call_args[0][0]
+        rendered = call_args.messages[0].contents.to_dict()
+        rendered_text = str(rendered)
+        assert matching_cafe.name in rendered_text
+        assert '熱鬧聚會咖啡' not in rendered_text
+        mock_reset.assert_called_once_with(user.line_user_id)
+
+    def test_end_to_end_flow_no_match_replies_not_found(self):
+        """端到端整合驗證：Groq 解析失敗時走關鍵字降級搜尋，查無結果時明確回覆"""
+        from cafe.tests.factories import CafeFactory as CafeFactoryForCafeApp
+
+        user = UserFactory()
+        CafeFactoryForCafeApp(name='其他咖啡店', ai_summary='適合朋友聚會聊天。')
+
+        with patch(
+            'cafe.services.search_service.GroqAPI.parse_search_description',
+            return_value=None,
+        ):
+            mock_api, mock_reset = self._run(user, '完全不相關的描述文字')
+
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert '找不到' in call_args.messages[0].text
+        mock_reset.assert_called_once_with(user.line_user_id)

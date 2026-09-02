@@ -118,6 +118,64 @@ class TestGetOrCreateCafeInfo:
         assert info_d is None
         assert cafe is None
 
+    def test_triggers_ai_summary_generation_when_new_cafe_has_reviews(self):
+        """新建店家且 reviews 非空時，觸發 generate_cafe_ai_summary.delay"""
+        user = UserFactory()
+        place_id = 'test_place_id_with_reviews'
+        google_data = {
+            'place_id': place_id,
+            'name': '測試咖啡店',
+            'address': '台北市信義區',
+            'lat': 25.033,
+            'lng': 121.564,
+            'reviews': ['環境安靜', '咖啡好喝'],
+        }
+
+        with (
+            patch('line_bot.handlers.helpers.ApiUsageService.try_increment_detail_calls', return_value=True),
+            patch('line_bot.handlers.helpers.GoogleAPI.get_shop_detail', return_value=google_data),
+            patch('line_bot.handlers.helpers.CafeAttributeMatcher.match_and_sync_attributes', return_value=False),
+            patch('line_bot.handlers.helpers.generate_cafe_ai_summary') as mock_summary_task,
+        ):
+            info_d, cafe = get_or_create_cafe_info(place_id, user.id)
+
+        mock_summary_task.delay.assert_called_once_with(cafe.id)
+
+    def test_does_not_trigger_ai_summary_generation_when_new_cafe_has_no_reviews(self):
+        """新建店家且 reviews 為空時，不觸發 generate_cafe_ai_summary.delay"""
+        user = UserFactory()
+        place_id = 'test_place_id_without_reviews'
+        google_data = {
+            'place_id': place_id,
+            'name': '測試咖啡店',
+            'address': '台北市信義區',
+            'lat': 25.033,
+            'lng': 121.564,
+            'reviews': [],
+        }
+
+        with (
+            patch('line_bot.handlers.helpers.ApiUsageService.try_increment_detail_calls', return_value=True),
+            patch('line_bot.handlers.helpers.GoogleAPI.get_shop_detail', return_value=google_data),
+            patch('line_bot.handlers.helpers.CafeAttributeMatcher.match_and_sync_attributes', return_value=False),
+            patch('line_bot.handlers.helpers.generate_cafe_ai_summary') as mock_summary_task,
+        ):
+            get_or_create_cafe_info(place_id, user.id)
+
+        mock_summary_task.delay.assert_not_called()
+
+    def test_does_not_trigger_ai_summary_generation_for_existing_cafe(self):
+        """既有店家（非新建，直接從 DB 取得）不重複觸發 generate_cafe_ai_summary.delay"""
+        cafe = CafeFactory(last_refreshed=timezone.now(), reviews=['環境安靜'])
+
+        with (
+            patch('line_bot.handlers.helpers.CafeAttributeMatcher.match_and_sync_attributes', return_value=False),
+            patch('line_bot.handlers.helpers.generate_cafe_ai_summary') as mock_summary_task,
+        ):
+            get_or_create_cafe_info(cafe.place_id, user_id=1)
+
+        mock_summary_task.delay.assert_not_called()
+
 
 class TestReplyText:
     """測試 reply_text"""
