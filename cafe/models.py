@@ -65,6 +65,9 @@ class Cafe(models.Model):
     # 查詢資料是否有定期更新，每30天會更新資料（使用者若有查詢該筆資料）
     last_refreshed = models.DateTimeField(null=True, blank=True, verbose_name='資料最後更新時間')
 
+    # AI 生成的摘要，供描述搜尋比對用（見 cafe-description-search change）
+    ai_summary = models.TextField(null=True, blank=True, verbose_name='AI 摘要')
+
     # 咖啡店的環境
     limited_time = models.CharField(max_length=10, null=True, blank=True, choices=LIMITED_TIME_CHOICES,
                                     verbose_name='是否限時')
@@ -121,6 +124,7 @@ class Cafe(models.Model):
             'lng': float(self.lng) if self.lng is not None else None,
             'opening_hours': self.opening_hours,
             'reviews': self.reviews or [],
+            'ai_summary': self.ai_summary,
             'limited_time': self.limited_time,
             'has_socket': self.has_socket,
             'pet_friendly': self.pet_friendly,

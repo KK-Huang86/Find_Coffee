@@ -1,6 +1,9 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+from linebot.v3.messaging import FlexMessage
+
+from cafe.models import Cafe
 from line_bot.constants import MenuAction, UserState
 from line_bot.handlers.postback_actions import (
     handle_favorite,
@@ -9,7 +12,9 @@ from line_bot.handlers.postback_actions import (
     handle_recent_search,
     handle_menu,
     handle_all_pet_search,
+    handle_description_search_text,
 )
+from cafe.services.search_service import CafeSearchResult
 from line_bot.tests.factories import CafeFactory, UserFactory
 
 
@@ -455,3 +460,84 @@ class TestReplyCafePage:
 
         _, _, _, has_more_arg = mock_qr.call_args[0]
         assert has_more_arg is False
+
+
+@pytest.mark.django_db
+class TestMenuDescriptionSearch:
+    """測試 MenuAction.DESCRIPTION_SEARCH 入口"""
+
+    def test_sets_state_and_replies_prompt(self):
+        """設定等待狀態並回覆輸入提示"""
+        user = UserFactory()
+        mock_api = MagicMock()
+
+        with patch('line_bot.handlers.postback_actions.StateManager.set_state') as mock_state:
+            handle_menu(mock_api, 'test_token', user, {'type': MenuAction.DESCRIPTION_SEARCH})
+
+        mock_state.assert_called_once_with(user.line_user_id, UserState.WAITING_DESCRIPTION_SEARCH)
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert '描述' in call_args.messages[0].text
+
+
+@pytest.mark.django_db
+class TestHandleDescriptionSearchText:
+    """測試 handle_description_search_text"""
+
+    def test_quota_exceeded_replies_quota_message_and_not_generic_not_found(self):
+        """quota_exceeded 時回覆額度不足訊息，而非用查無結果訊息猜測"""
+        user = UserFactory()
+        mock_api = MagicMock()
+
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description',
+            return_value=CafeSearchResult(status='quota_exceeded', cafes=Cafe.objects.none()),
+        ) as mock_search:
+            handle_description_search_text(mock_api, 'test_token', user, '安靜的店')
+
+        mock_search.assert_called_once_with('安靜的店', user.id)
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert '額度' in call_args.messages[0].text
+
+    def test_ok_with_no_results_replies_not_found_message(self):
+        """status='ok' 且 cafes 為空時，回覆找不到符合描述的店家"""
+        user = UserFactory()
+        mock_api = MagicMock()
+
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description',
+            return_value=CafeSearchResult(status='ok', cafes=Cafe.objects.none()),
+        ):
+            handle_description_search_text(mock_api, 'test_token', user, '安靜的店')
+
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert '找不到' in call_args.messages[0].text
+
+    def test_ok_with_results_replies_flex_carousel(self):
+        """status='ok' 且有符合店家時，回覆 Flex Message carousel"""
+        user = UserFactory()
+        mock_api = MagicMock()
+        cafe = CafeFactory(ai_summary='適合安靜工作')
+
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description',
+            return_value=CafeSearchResult(status='ok', cafes=Cafe.objects.filter(id=cafe.id)),
+        ):
+            handle_description_search_text(mock_api, 'test_token', user, '安靜的店')
+
+        mock_api.reply_message.assert_called_once()
+        call_args = mock_api.reply_message.call_args[0][0]
+        assert isinstance(call_args.messages[0], FlexMessage)
+
+    def test_blank_input_does_not_crash_and_replies(self):
+        """空白輸入不拋例外，仍會回覆訊息（走查無結果路徑）"""
+        user = UserFactory()
+        mock_api = MagicMock()
+
+        with patch(
+            'line_bot.handlers.postback_actions.CafeSearchService.search_by_description',
+            return_value=CafeSearchResult(status='ok', cafes=Cafe.objects.none()),
+        ) as mock_search:
+            handle_description_search_text(mock_api, 'test_token', user, '   ')
+
+        mock_search.assert_called_once_with('   ', user.id)
+        mock_api.reply_message.assert_called_once()

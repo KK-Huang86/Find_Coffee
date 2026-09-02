@@ -7,6 +7,8 @@ from datetime import timedelta
 
 from cafe.models import Cafe
 from integrations.google.api import GoogleAPI
+from integrations.groq.api import GroqAPI
+from integrations.services import ApiUsageService
 
 from decouple import config
 import boto3  # Python SDK
@@ -164,6 +166,8 @@ def refresh_cafe_data(cafe_id):
         logger.warning(f'Google API 無回傳資料: {cafe.place_id}')
         return {'status': 'failed', 'reason': 'no_api_response'}
 
+    old_reviews = cafe.reviews
+
     # 1. 更新欄位（保留原值如果 API 沒返回）
     # cafe.name = result.get('name') or cafe.name -> 如果拿到 None 會爆掉
     # update_data['name'] = None 暫存，後續 setattr存入
@@ -186,6 +190,11 @@ def refresh_cafe_data(cafe_id):
     cafe.last_refreshed = timezone.now()
     cafe.save()
 
+    # 1b. reviews 有變化，或先前尚未成功產生 ai_summary，重新觸發 AI 摘要產生（重試機會）
+    reviews_changed = update_data['reviews'] is not None and update_data['reviews'] != old_reviews
+    if reviews_changed or not cafe.ai_summary:
+        generate_cafe_ai_summary.delay(cafe.id)
+
     # 2. 再來決定「是否需要更新照片」 photo_reference 本質是
     if not cafe.photo_s3_url:
         download_and_upload_cafe_photo.delay(cafe.id)
@@ -204,3 +213,36 @@ def refresh_cafe_data(cafe_id):
 
     logger.info(f'已更新咖啡店資料: {cafe.name} ({cafe.place_id})')
     return {'status': 'success', 'cafe_id': cafe.id, 'cafe_name': cafe.name}
+
+
+@shared_task(
+    max_retries=3,
+    default_retry_delay=60,
+)
+def generate_cafe_ai_summary(cafe_id):
+    """
+    異步產生咖啡店的 AI 摘要（ai_summary），供描述搜尋比對用。
+    額度記在系統帳號（見 ApiUsageService.get_system_ai_user_id），不佔用真人使用者的月額度。
+    """
+    try:
+        cafe = Cafe.objects.get(id=cafe_id)
+    except Cafe.DoesNotExist:
+        logger.error(f'Cafe {cafe_id} 不存在，無法產生 AI 摘要')
+        return {'status': 'failed', 'reason': 'cafe_not_found'}
+
+    if not cafe.reviews:
+        return {'status': 'skipped', 'reason': 'no_reviews'}
+
+    system_user_id = ApiUsageService.get_system_ai_user_id()
+    if not ApiUsageService.try_increment_ai_calls(system_user_id):
+        logger.warning(f'系統 AI 摘要額度已用盡，跳過 Cafe {cafe_id}')
+        return {'status': 'skipped', 'reason': 'quota_exceeded'}
+
+    summary = GroqAPI.summarize_for_search(name=cafe.name, reviews=cafe.reviews)
+    if not summary:
+        ApiUsageService.revert_ai_call(system_user_id)
+        return {'status': 'failed', 'reason': 'groq_error'}
+
+    Cafe.objects.filter(id=cafe_id).update(ai_summary=summary)
+    logger.info(f'已產生 AI 摘要: {cafe.name} ({cafe.place_id})')
+    return {'status': 'success', 'cafe_id': cafe.id}

@@ -217,6 +217,36 @@ class TestCafeModel:
         with pytest.raises(IntegrityError):
             CafeFactory(place_id='unique_id')
 
+    def test_ai_summary_default_none(self):
+        """測試 ai_summary 預設為 None"""
+        cafe = CafeFactory()
+
+        assert cafe.ai_summary is None
+
+    def test_ai_summary_can_be_set(self):
+        """測試 ai_summary 可儲存 AI 生成的摘要文字"""
+        cafe = CafeFactory(ai_summary='適合安靜工作的咖啡店，有插座。')
+
+        cafe.refresh_from_db()
+        assert cafe.ai_summary == '適合安靜工作的咖啡店，有插座。'
+
+    def test_to_dict_includes_ai_summary_none(self):
+        """測試 to_dict 在 ai_summary 為空值時包含該鍵且為 None"""
+        cafe = CafeFactory(ai_summary=None)
+
+        result = cafe.to_dict()
+
+        assert 'ai_summary' in result
+        assert result['ai_summary'] is None
+
+    def test_to_dict_includes_ai_summary_value(self):
+        """測試 to_dict 正確帶入已產生的 ai_summary"""
+        cafe = CafeFactory(ai_summary='適合安靜工作的咖啡店，有插座。')
+
+        result = cafe.to_dict()
+
+        assert result['ai_summary'] == '適合安靜工作的咖啡店，有插座。'
+
 
 # Favorite Model Tests
 

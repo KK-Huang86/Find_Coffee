@@ -25,7 +25,7 @@ from linebot.v3.webhooks import (
 from integrations.google.api import GoogleAPI, OutOfServiceAreaError
 from line_bot.constants import UserState
 from line_bot.builders.flex_builder import LineMessageBuilder, QuickReplyBuilder
-from line_bot.handlers.postback_actions import ACTION_HANDLERS, _reply_cafe_page
+from line_bot.handlers.postback_actions import ACTION_HANDLERS, _reply_cafe_page, handle_description_search_text
 from line_bot.handlers.helpers import reply_text
 from line_bot.services.search_cache import SearchHistoryService
 from line_bot.state import StateManager
@@ -187,6 +187,12 @@ def handle_message(event):
                 ),
                 alt_text=f'{district} 寵物友善咖啡廳',
             )
+            StateManager.reset_state(user_id)
+            return
+
+        # 使用者輸入自然語言描述，搜尋符合描述的咖啡店
+        elif state == UserState.WAITING_DESCRIPTION_SEARCH:
+            handle_description_search_text(line_bot_api, event.reply_token, user, text)
             StateManager.reset_state(user_id)
             return
 

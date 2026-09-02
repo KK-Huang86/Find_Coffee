@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from cafe.models import Cafe
 from cafe.services.attribute_matcher import CafeAttributeMatcher
-from cafe.tasks import refresh_cafe_data
+from cafe.tasks import generate_cafe_ai_summary, refresh_cafe_data
 from integrations.google.api import GoogleAPI
 from integrations.services import ApiUsageService
 from line_bot.constants import QUOTA_EXCEEDED
@@ -94,6 +94,9 @@ def get_or_create_cafe_info(place_id, user_id):
             last_refreshed=timezone.now(),
         )
         logger.info(f'建立新咖啡店: {cafe.name} ({cafe.place_id})')
+
+        if cafe.reviews:
+            generate_cafe_ai_summary.delay(cafe.id)
 
         # 從 Google API 查詢的咖啡店，理論上沒有 插頭 跟 是否為不限時的選項，查 CafeNomadCache
         try:

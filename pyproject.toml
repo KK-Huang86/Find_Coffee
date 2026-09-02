@@ -20,6 +20,7 @@ dependencies = [
     "gunicorn~=23.0.0",
     "playwright>=1.58.0",
     "groq>=1.4.0",
+    "jieba>=0.42.1",
 ]
 
 # 測試開發需求

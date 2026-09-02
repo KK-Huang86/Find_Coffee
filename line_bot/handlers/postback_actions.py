@@ -8,6 +8,7 @@ from linebot.v3.messaging import ReplyMessageRequest, TextMessage, FlexMessage, 
 
 from cafe.models import Cafe, CafeAttributeVote
 from integrations.groq.api import GroqAPI
+from cafe.services.search_service import CafeSearchService
 from cafe.services.vote_service import VoteService
 from integrations.google.api import GoogleAPI
 from integrations.services import ApiUsageService
@@ -516,6 +517,46 @@ def _menu_pet_friendly_search(line_bot_api, reply_token, user):
     reply_text(line_bot_api, reply_token, '請輸入行政區名稱，我幫你找寵物友善的咖啡廳 🐕\n（例如：大安區、信義區）')
 
 
+def _menu_description_search(line_bot_api, reply_token, user):
+    """處理描述搜尋：設定狀態，等待使用者輸入描述"""
+    StateManager.set_state(user.line_user_id, UserState.WAITING_DESCRIPTION_SEARCH)
+    reply_text(
+        line_bot_api, reply_token,
+        '請描述你想找的咖啡店 ☕️\n（例如：安靜適合工作、有插座、歡迎寵物）'
+    )
+
+
+def handle_description_search_text(line_bot_api, reply_token, user, text):
+    """處理使用者輸入的描述搜尋文字，依 CafeSearchResult.status 分流呈現"""
+    result = CafeSearchService.search_by_description(text, user.id)
+
+    if result.status == 'quota_exceeded':
+        reply_text(line_bot_api, reply_token, '本月 AI 搜尋額度已達上限 😢')
+        return
+
+    cafes = list(result.cafes[:PAGE_SIZE])
+
+    if not cafes:
+        reply_text(
+            line_bot_api, reply_token,
+            '找不到符合描述的店家 😢\n\n試試看換個描述方式，或用其他方式搜尋！'
+        )
+        return
+
+    flex_messages = [
+        FlexMessageBuilder.create_shop_flex_message(cafe.to_dict(), is_multiple=True)
+        for cafe in cafes
+    ]
+    carousel = {'type': 'carousel', 'contents': flex_messages}
+    flex_msg = FlexMessage(
+        alt_text='符合描述的咖啡店',
+        contents=FlexContainer.from_dict(carousel),
+    )
+    line_bot_api.reply_message(
+        ReplyMessageRequest(reply_token=reply_token, messages=[flex_msg])
+    )
+
+
 # Menu Dispatch Table
 MENU_HANDLERS = {
     MenuAction.SEARCH_SHOP_NAME: _menu_search_shop_name,
@@ -527,6 +568,7 @@ MENU_HANDLERS = {
     MenuAction.DISTRICT_SEARCH: _menu_district_search,
     MenuAction.PET_SEARCH: _menu_pet_search,
     MenuAction.PET_FRIENDLY_SEARCH: _menu_pet_friendly_search,
+    MenuAction.DESCRIPTION_SEARCH: _menu_description_search,
 }
 
 

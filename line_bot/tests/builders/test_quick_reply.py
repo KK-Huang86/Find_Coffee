@@ -37,6 +37,16 @@ class TestQuickReplyBuilderCreateSearchAgainActions:
         assert any(MenuAction.FAVORITES in d for d in datas)
 
 
+class TestQuickReplyBuilderCreateMoreInfoActions:
+    """測試 QuickReplyBuilder.create_more_info_actions"""
+
+    def test_contains_description_search_action(self):
+        """包含『描述搜尋』入口，觸發 DESCRIPTION_SEARCH 選單動作"""
+        result = QuickReplyBuilder.create_more_info_actions()
+        datas = [item.action.data for item in result.items]
+        assert any(MenuAction.DESCRIPTION_SEARCH in d for d in datas)
+
+
 class TestQuickReplyBuilderCreateCarouselPaginationActions:
     """測試 QuickReplyBuilder.create_carousel_pagination_actions"""
 

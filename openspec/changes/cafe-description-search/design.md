@@ -33,7 +33,7 @@
 ### 2. 摘要產生的額度與冪等性
 `generate_cafe_ai_summary` task：
 1. 用 `Cafe.objects.get(id=cafe_id)` 取店家，`reviews` 為空則直接 `return {'status': 'skipped', 'reason': 'no_reviews'}`，不呼叫 Groq、不消耗額度。
-2. 呼叫 `ApiUsageService.try_increment_ai_calls`（比照 `handle_ask_ai` 現有模式），額度用盡則 `return {'status': 'skipped', 'reason': 'quota_exceeded'}`。此額度呼叫需要一個系統層級的 user_id（非個別 LINE 使用者），與現有「使用者觸發」的 AI 呼叫分開計數或共用同一個池，需在 tasks.md 落地時決定計數 key（設計傾向：批次生成不綁定單一使用者，另建系統帳號或月額度 key，避免佔用真人使用者額度）。
+2. 以 `ApiUsageService.get_system_ai_user_id()` 取得系統帳號 id，呼叫 `ApiUsageService.try_increment_ai_calls(system_user_id)`（見 Open Questions 的解決方案），額度用盡則 `return {'status': 'skipped', 'reason': 'quota_exceeded'}`，不佔用真人使用者的額度。
 3. 呼叫 `GroqAPI.summarize_for_search(...)`（新方法，見下）取得摘要文字；失敗（回傳 `None`）則 `revert_ai_call` 並 `return {'status': 'failed', 'reason': 'groq_error'}`，`ai_summary` 保持原值（不覆蓋成 `None`），下次 refresh 會再重試。
 4. 成功則 `Cafe.objects.filter(id=cafe_id).update(ai_summary=result)`（比照 `favorite_count` 的 `.update()` 寫法，避免覆蓋掉同時間其他欄位變更；不用 `cafe.save()` 整包存檔）。
 5. Task 需可重複執行不出錯（Celery 重試/重複觸發）：同一 `cafe_id` 重跑只會覆寫成最新摘要，不會產生重複資料或副作用，滿足冪等性。
@@ -93,7 +93,7 @@ class CafeSearchResult:
 
 - **[風險] Groq 解析結果格式不穩定（非 JSON / 欄位外洩）** → 嚴格白名單驗證 + 解析失敗 fallback 為關鍵字比對，不讓未驗證輸出進入查詢條件。
 - **[風險] 摘要背景生成失敗會讓新店家長期沒有 `ai_summary`，永遠搜不到** → `refresh_cafe_data` 每次刷新都重新觸發生成（若 `ai_summary` 仍為空），提供自我修復機會；同時 `ai_summary__isnull=False` 的過濾條件確保結果只是「暫時搜不到」而非回傳錯誤資料。
-- **[風險] 批次生成大量呼叫 Groq，短時間內衝額度，排擠使用者主動觸發「問 AI」的額度** → 決策 2 提到需要獨立的額度 key／池，非與真人使用者共用同一個月額度計數；此配置細節留待 tasks.md／實作階段依 `ApiUsageService` 現有介面決定（見 Open Questions）。
+- **[風險] 批次生成大量呼叫 Groq，短時間內衝額度，排擠使用者主動觸發「問 AI」的額度** → 批次生成走獨立的系統帳號額度（見 Open Questions 的解決方案：`get_system_ai_user_id()`），與真人使用者的月額度計數完全分開，不會互相排擠。
 - **[取捨] 用結構化屬性比對而非向量相似度** → 犧牲「語意相近但屬性未提及」的召回率，換取零額外基礎設施、可解釋、與既有屬性系統一致（使用者已在需求澄清階段選定此方案）。
 
 ## Migration Plan
@@ -102,6 +102,6 @@ class CafeSearchResult:
 2. 部署後，既有店家的 `ai_summary` 皆為 `None`，描述搜尋在補齊完成前召回率偏低；此為預期過渡狀態，不需要额外的一次性 backfill script（可選：若需加速覆蓋率，另開一次性 management command 補跑舊店家，非本次必要範圍，列入 tasks.md 視情況決定）。
 3. Rollback：程式碼（新 task/service/state）可安全回退，不影響既有欄位與流程。但 `ai_summary` **欄位本身的反向 migration 會直接刪除該欄位，連同當時已產生的所有摘要資料一併遺失**——nullable 只代表欄位允許空值，不代表 reverse migration 不會清空資料。若日後需要回滾且必須保留已產生的摘要，需先執行一次性匯出（例如 `manage.py dumpdata` 或另存快照）再 reverse migration；若擔心資料遺失風險，也可選擇「保留欄位、只回退程式碼」的部分回滾策略，不對 `ai_summary` 欄位做 reverse migration。
 
-## Open Questions
+## Open Questions（已解決）
 
-- 批次生成 `ai_summary` 的 Groq 呼叫要記在哪個額度 key 下（獨立系統額度 vs. 併入現有月額度）？此問題不影響 spec 行為與任務拆解的形狀，可在 tasks.md 實作階段依 `ApiUsageService` 現況決定，但需在合併前有明確結論並寫進實作註記。
+- **批次生成 `ai_summary` 的 Groq 呼叫記在哪個額度 key 下？** 決定：沿用現有 `ApiUsageService.try_increment_ai_calls` / `revert_ai_call` 介面本身（不新增方法、不新增第二套額度系統，符合 Goals 中「摘要產生與描述解析共用既有 AI 額度與失敗處理機制」），但需要一個穩定的 `user_id` 讓批次任務掛靠。作法：`integrations/services.py` 新增 `ApiUsageService.get_system_ai_user_id()`，以固定的 `line_user_id`（例如 `system:ai-summary-batch`）對 `User` 表 `get_or_create`（`line_user_id` 已是 `unique` 欄位，`get_or_create` 天生冪等，重複呼叫不會建立第二筆），回傳該系統帳號的 `user.id`；**僅 `generate_cafe_ai_summary`（背景批次、無真實使用者情境）使用此系統帳號 id** 走既有額度方法。`search_by_description` 是使用者主動觸發的查詢（如同 `handle_ask_ai`），描述解析的 Groq 呼叫額度直接記在**發起查詢的 LINE 使用者自己的 `user_id`** 下，不使用系統帳號，避免真人操作被誤記到系統額度、也避免多個使用者共用同一額度互相排擠。

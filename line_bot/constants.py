@@ -10,6 +10,7 @@ class UserState:
     WAITING_DISTRICT = '等待查詢行政區'
     WAITING_PET_DISTRICT = '等待查詢有貓貓狗狗的地區'
     WAITING_PET_FRIENDLY_DISTRICT = '等待查詢寵物友善的地區'
+    WAITING_DESCRIPTION_SEARCH = '等待描述搜尋'
 
 
 # 投票屬性順序
@@ -85,3 +86,4 @@ class MenuAction:
     DISTRICT_SEARCH = 'district_search'
     PET_SEARCH = 'pet_search'
     PET_FRIENDLY_SEARCH = 'pet_friendly_search'
+    DESCRIPTION_SEARCH = 'description_search'
