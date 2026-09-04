@@ -156,6 +156,12 @@ class QuickReplyBuilder:
                         data=f'action=menu&type={MenuAction.PET_FRIENDLY_SEARCH}'
                     )
                 ),
+                QuickReplyItem(
+                    action=PostbackAction(
+                        label='📝 描述搜尋',
+                        data=f'action=menu&type={MenuAction.DESCRIPTION_SEARCH}'
+                    )
+                ),
             ]
         )
 
